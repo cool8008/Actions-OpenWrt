@@ -1,107 +1,83 @@
-name: OpenWrt Builder
+#!/bin/bash
+#=================================================
+shopt -s extglob
 
-on:
-  workflow_dispatch:
-    inputs:
-      clean_build:
-        description: 'Perform clean build'
-        required: false
-        default: 'false'
+sed -i '$a src-git kiddin9 https://github.com/kiddin9/kwrt-packages.git;main' feeds.conf.default
+sed -i "/telephony/d" feeds.conf.default
 
-env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  TZ: Asia/Shanghai
-  CLEAN_BUILD: ${{ inputs.clean_build }}
+sed -i "s?targets/%S/packages?targets/%S/\$(LINUX_VERSION)?" include/feeds.mk
 
-jobs:
-  build:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 180
+sed -i '/	refresh_config();/d' scripts/feeds
 
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+./scripts/feeds update -a
+./scripts/feeds install -a -p kiddin9 -f
+./scripts/feeds install -a
 
-    - name: Setup Environment
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential ccache cmake git g++-multilib \
-          libssl-dev python3 rsync unzip wget
+sed --follow-symlinks -i "s#%C\"#%C by Kiddin'\"#" package/base-files/files/etc/os-release
+sed -i -e '$a /etc/bench.log' \
+        -e '/\/etc\/profile/d' \
+        -e '/\/etc\/shinit/d' \
+        package/base-files/files/lib/upgrade/keep.d/base-files-essential
+sed -i -e '/^\/etc\/profile/d' \
+        -e '/^\/etc\/shinit/d' \
+        package/base-files/Makefile
+sed -i "s/192.168.1/10.0.0/" package/base-files/files/bin/config_generate
 
-    - name: Clone Source
-      run: |
-        [ "$CLEAN_BUILD" = "true" ] && rm -rf openwrt || true
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-        cd openwrt
-        git submodule update --init --recursive
+wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/openwrt-24.10/package/kernel/linux/modules/video.mk -P package/kernel/linux/modules/
+wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/openwrt-24.10/package/network/utils/nftables/patches/002-nftables-add-fullcone-expression-support.patch -P package/network/utils/nftables/patches/
+wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/openwrt-24.10/package/network/utils/nftables/patches/001-drop-useless-file.patch -P package/network/utils/nftables/patches/
+wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/openwrt-24.10/package/libs/libnftnl/patches/001-libnftnl-add-fullcone-expression-support.patch -P package/libs/libnftnl/patches/
+wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/openwrt-24.10/package/firmware/wireless-regdb/patches/600-custom-change-txpower-and-dfs.patch -P package/firmware/wireless-regdb/patches/
+wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/master/config/Config-kernel.in -P config/
 
-    - name: Configure Kwrt DIY
-      run: |
-        cd openwrt
-        mkdir -p diy
+rm -rf package/libs/openssl package/network/services/ppp
+git_clone_path openwrt-24.10 https://github.com/immortalwrt/immortalwrt package/libs/openssl package/network/services/ppp
 
-        # 稀疏克隆 Kwrt 配置
-        if [ ! -d "diy/devices" ]; then
-          echo "::group::🚀 下载 Kwrt 配置"
-          git clone --filter=blob:none --no-checkout \
-            https://github.com/kiddin9/Kwrt.git diy-temp
-          git -C diy-temp checkout 389060a43dc9812af124e225fb4dc17363944fa8 \
-            -- devices/common/diy
-          mv diy-temp/devices diy/
-          rm -rf diy-temp
-          echo "::endgroup::"
-        fi
+echo "$(date +"%s")" >version.date
+sed -i '/$(curdir)\/compile:/c\$(curdir)/compile: package/opkg/host/compile' package/Makefile
+sed -i "s/DEFAULT_PACKAGES:=/DEFAULT_PACKAGES:=luci-app-advancedplus luci-app-firewall luci-app-package-manager luci-app-upnp luci-app-syscontrol luci-proto-wireguard \
+luci-app-wizard luci-base luci-compat luci-lib-ipkg luci-lib-fs \
+coremark wget-ssl curl autocore htop nano zram-swap kmod-lib-zstd kmod-tcp-bbr bash openssh-sftp-server block-mount resolveip ds-lite swconfig luci-app-fan luci-app-filemanager /" include/target.mk
 
-        # 配置 feeds
-        echo "::group::📦 配置软件源"
-        {
-          echo "src-git packages https://github.com/coolsnowwolf/packages"
-          echo "src-git luci https://github.com/coolsnowwolf/luci"
-          [ -d "diy/devices/common/diy/package/feeds" ] && \
-            find diy/devices/common/diy/package/feeds -name '*.feed' | xargs cat
-        } > feeds.conf.default
-        cat feeds.conf.default
-        echo "::endgroup::"
+sed -i "s/procd-ujail//" include/target.mk
 
-    - name: Update Feeds
-      run: |
-        cd openwrt
-        echo "::group::🔄 更新软件源"
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-        echo "::endgroup::"
+sed -i "s/^.*vermagic$/\techo '1' > \$(LINUX_DIR)\/.vermagic/" include/kernel-defaults.mk
 
-    - name: Apply Configuration
-      run: |
-        cd openwrt
-        echo "::group::⚙️ 应用配置"
-        if [ -f "diy/devices/common/diy/package/config" ]; then
-          cp -v diy/devices/common/diy/package/config .config
-        else
-          make defconfig
-        fi
-        echo "::endgroup::"
+status=$(curl -H "Authorization: token $REPO_TOKEN" -s "https://api.github.com/repos/kiddin9/kwrt-packages/actions/runs" | jq -r '.workflow_runs[0].status')
+echo "$status"
+while [[ "$status" == "in_progress" || "$status" == "queued" ]];do
+	echo "wait 5s"
+	sleep 5
+	status=$(curl -H "Authorization: token $REPO_TOKEN" -s "https://api.github.com/repos/kiddin9/kwrt-packages/actions/runs" | jq -r '.workflow_runs[0].status')
+done
 
-    - name: Download Packages
-      run: |
-        cd openwrt
-        echo "::group::⬇️ 下载依赖包"
-        make download -j$(nproc)
-        find dl -size -1k -delete -print
-        echo "::endgroup::"
+mv -f feeds/kiddin9/r81* tmp/
 
-    - name: Build Firmware
-      run: |
-        cd openwrt
-        echo "::group::🔨 开始编译"
-        make -j$(($(nproc)+1)) || make -j1 V=s
-        echo "::endgroup::"
+wget -N https://raw.githubusercontent.com/openwrt/packages/master/lang/golang/golang/Makefile -P feeds/packages/lang/golang/golang/
 
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: openwrt-firmware-${{ github.run_id }}
-        path: openwrt/bin/targets/*/*
-        retention-days: 3
+#sed -i "/call Build\/check-size,\$\$(KERNEL_SIZE)/d" include/image.mk
+
+rm -rf package/system/fstools
+git_clone_path master https://github.com/coolsnowwolf/lede mv target/linux/generic/hack-6.6 package/system/fstools
+rm -rf target/linux/generic/hack-6.6/929-Revert-genetlink* target/linux/generic/hack-6.6/767-net-phy-realtek-add-led*
+wget -N https://raw.githubusercontent.com/coolsnowwolf/lede/master/target/linux/generic/pending-6.6/613-netfilter_optional_tcp_window_check.patch -P target/linux/generic/pending-6.6/
+
+# find target/linux/x86 -name "config*" -exec bash -c 'cat kernel.conf >> "{}"' \;
+sed -i 's/max_requests 3/max_requests 20/g' package/network/services/uhttpd/files/uhttpd.config
+#rm -rf ./feeds/packages/lang/{golang,node}
+sed -i "s/tty\(0\|1\)::askfirst/tty\1::respawn/g" target/linux/*/base-files/etc/inittab
+
+date=`date +%m.%d.%Y`
+sed -i -e "/\(# \)\?REVISION:=/c\REVISION:=$date" -e '/VERSION_CODE:=/c\VERSION_CODE:=$(REVISION)' include/version.mk
+
+sed -i 's/option timeout 30/option timeout 60/g' package/system/rpcd/files/rpcd.config
+sed -i 's#20) \* 1000#60) \* 1000#g' feeds/luci/modules/luci-base/htdocs/luci-static/resources/rpc.js
+
+sed -i \
+	-e "s/+\(luci\|luci-ssl\|uhttpd\)\( \|$\)/\2/" \
+	-e "s/+nginx\( \|$\)/+nginx-ssl\1/" \
+	-e 's/+python\( \|$\)/+python3/' \
+	-e 's?../../lang?$(TOPDIR)/feeds/packages/lang?' \
+	package/feeds/kiddin9/*/Makefile
+
+sed -i "s/OpenWrt/Kwrt/g" package/base-files/files/bin/config_generate package/base-files/image-config.in package/network/config/wifi-scripts/files/lib/wifi/mac80211.uc config/Config-images.in Config.in include/u-boot.mk include/version.mk || true
