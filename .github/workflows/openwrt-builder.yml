@@ -1,107 +1,117 @@
-name: OpenWrt Builder
+#!/bin/bash
+#=================================================
+# OpenWrt Kwrt 定制编译脚本
+# 版本：2024.06
+#=================================================
 
-on:
-  workflow_dispatch:
-    inputs:
-      clean_build:
-        description: 'Perform clean build'
-        required: false
-        default: 'false'
+set -eo pipefail
+shopt -s extglob
 
-env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  TZ: Asia/Shanghai
-  CLEAN_BUILD: ${{ inputs.clean_build }}
+# 初始化环境变量
+REPO_TOKEN=${REPO_TOKEN:-}
+KWRT_PKG_BRANCH="main"
+OPENWRT_BRANCH="openwrt-24.10"
+IMMORTALWRT_BRANCH="openwrt-24.10"
 
-jobs:
-  build:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 180
+# 1. 配置软件源
+echo "🔧 配置软件源..."
+{
+  echo "src-git packages https://github.com/coolsnowwolf/packages"
+  echo "src-git luci https://github.com/coolsnowwolf/luci"
+  echo "src-git routing https://github.com/coolsnowwolf/routing"
+  echo "src-git kiddin9 https://github.com/kiddin9/kwrt-packages.git;$KWRT_PKG_BRANCH"
+} > feeds.conf.default
 
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+# 2. 修改编译配置
+echo "⚙️ 调整编译参数..."
+sed -i "s?targets/%S/packages?targets/%S/\$(LINUX_VERSION)?" include/feeds.mk
+sed -i '/	refresh_config();/d' scripts/feeds
 
-    - name: Setup Environment
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential ccache cmake git g++-multilib \
-          libssl-dev python3 rsync unzip wget
+# 3. 更新软件源
+echo "🔄 更新软件源..."
+./scripts/feeds update -a
+./scripts/feeds install -a -p kiddin9 -f
+./scripts/feeds install -a
 
-    - name: Clone Source
-      run: |
-        [ "$CLEAN_BUILD" = "true" ] && rm -rf openwrt || true
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-        cd openwrt
-        git submodule update --init --recursive
+# 4. 系统基础定制
+echo "🏗️ 系统基础定制..."
+sed -i "s#%C\"#%C by Kiddin'\"#" package/base-files/files/etc/os-release
+sed -i "s/192.168.1/10.0.0/" package/base-files/files/bin/config_generate
 
-    - name: Configure Kwrt DIY
-      run: |
-        cd openwrt
-        mkdir -p diy
+# 5. 下载必要组件
+echo "📥 下载组件..."
+wget_deps() {
+  local base_url="https://github.com/immortalwrt/immortalwrt/raw/refs/heads/$IMMORTALWRT_BRANCH"
+  mkdir -p package/kernel/linux/modules/ package/network/utils/nftables/patches/ \
+           package/libs/libnftnl/patches/ package/firmware/wireless-regdb/patches/
+  
+  wget -qN $base_url/package/kernel/linux/modules/video.mk -P package/kernel/linux/modules/
+  wget -qN $base_url/package/network/utils/nftables/patches/{001,002}-*.patch -P package/network/utils/nftables/patches/
+  wget -qN $base_url/package/libs/libnftnl/patches/001-*.patch -P package/libs/libnftnl/patches/
+  wget -qN $base_url/package/firmware/wireless-regdb/patches/600-*.patch -P package/firmware/wireless-regdb/patches/
+  wget -qN $base_url/config/Config-kernel.in -P config/
+}
+wget_deps
 
-        # 稀疏克隆 Kwrt 配置
-        if [ ! -d "diy/devices" ]; then
-          echo "::group::🚀 下载 Kwrt 配置"
-          git clone --filter=blob:none --no-checkout \
-            https://github.com/kiddin9/Kwrt.git diy-temp
-          git -C diy-temp checkout 389060a43dc9812af124e225fb4dc17363944fa8 \
-            -- devices/common/diy
-          mv diy-temp/devices diy/
-          rm -rf diy-temp
-          echo "::endgroup::"
-        fi
+# 6. 替换关键组件
+echo "🔄 替换核心组件..."
+git_clone_path() {
+  local branch=$1 repo=$2 paths=${@:3}
+  for path in $paths; do
+    rm -rf $path
+    git clone --depth=1 -b $branch $repo $path
+  done
+}
 
-        # 配置 feeds
-        echo "::group::📦 配置软件源"
-        {
-          echo "src-git packages https://github.com/coolsnowwolf/packages"
-          echo "src-git luci https://github.com/coolsnowwolf/luci"
-          [ -d "diy/devices/common/diy/package/feeds" ] && \
-            find diy/devices/common/diy/package/feeds -name '*.feed' | xargs cat
-        } > feeds.conf.default
-        cat feeds.conf.default
-        echo "::endgroup::"
+rm -rf package/libs/openssl package/network/services/ppp
+git_clone_path $OPENWRT_BRANCH https://github.com/immortalwrt/immortalwrt \
+  package/libs/openssl package/network/services/ppp
 
-    - name: Update Feeds
-      run: |
-        cd openwrt
-        echo "::group::🔄 更新软件源"
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-        echo "::endgroup::"
+# 7. 版本控制
+echo "🏷️ 设置版本信息..."
+echo "$(date +"%s")" > version.date
+sed -i "/REVISION:=/c\REVISION:=$(date +%m.%d.%Y)" include/version.mk
+sed -i '/VERSION_CODE:=/c\VERSION_CODE:=$(REVISION)' include/version.mk
 
-    - name: Apply Configuration
-      run: |
-        cd openwrt
-        echo "::group::⚙️ 应用配置"
-        if [ -f "diy/devices/common/diy/package/config" ]; then
-          cp -v diy/devices/common/diy/package/config .config
-        else
-          make defconfig
-        fi
-        echo "::endgroup::"
+# 8. 编译优化
+echo "⚡ 编译优化..."
+sed -i '/$(curdir)\/compile:/c\$(curdir)/compile: package/opkg/host/compile' package/Makefile
+sed -i "s/DEFAULT_PACKAGES:=/DEFAULT_PACKAGES:=luci-app-advancedplus luci-app-firewall luci-app-package-manager /" include/target.mk
+sed -i "s/procd-ujail//" include/target.mk
+sed -i "s/^.*vermagic$/\techo '1' > \$(LINUX_DIR)\/.vermagic/" include/kernel-defaults.mk
 
-    - name: Download Packages
-      run: |
-        cd openwrt
-        echo "::group::⬇️ 下载依赖包"
-        make download -j$(nproc)
-        find dl -size -1k -delete -print
-        echo "::endgroup::"
+# 9. 等待kwrt-packages构建完成
+if [ -n "$REPO_TOKEN" ]; then
+  echo "⏳ 检查kwrt-packages构建状态..."
+  status=$(curl -sH "Authorization: token $REPO_TOKEN" \
+    "https://api.github.com/repos/kiddin9/kwrt-packages/actions/runs" \
+    | jq -r '.workflow_runs[0].status')
+  
+  while [[ "$status" == "in_progress" || "$status" == "queued" ]]; do
+    echo "⏱️ 构建进行中，等待5秒..."
+    sleep 5
+    status=$(curl -sH "Authorization: token $REPO_TOKEN" \
+      "https://api.github.com/repos/kiddin9/kwrt-packages/actions/runs" \
+      | jq -r '.workflow_runs[0].status')
+  done
+fi
 
-    - name: Build Firmware
-      run: |
-        cd openwrt
-        echo "::group::🔨 开始编译"
-        make -j$(($(nproc)+1)) || make -j1 V=s
-        echo "::endgroup::"
+# 10. 清理临时文件
+echo "🧹 清理工作..."
+mv -f feeds/kiddin9/r81* tmp/ 2>/dev/null || true
 
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: openwrt-firmware-${{ github.run_id }}
-        path: openwrt/bin/targets/*/*
-        retention-days: 3
+# 11. 其他优化
+echo "🎛️ 系统调优..."
+sed -i 's/max_requests 3/max_requests 20/g' package/network/services/uhttpd/files/uhttpd.config
+sed -i "s/tty\(0\|1\)::askfirst/tty\1::respawn/g" target/linux/*/base-files/etc/inittab
+sed -i 's/option timeout 30/option timeout 60/g' package/system/rpcd/files/rpcd.config
+
+# 12. 统一命名
+echo "🏷️ 统一品牌标识..."
+sed -i "s/OpenWrt/Kwrt/g" \
+  package/base-files/files/bin/config_generate \
+  package/base-files/image-config.in \
+  include/version.mk \
+  2>/dev/null || true
+
+echo "✅ 所有预处理步骤已完成！"
