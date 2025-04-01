@@ -49,6 +49,10 @@ jobs:
           [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
           cd $rootdir
           }
+        export -f git_clone_path
+        cp -rf $GITHUB_WORKSPACE. openwrt/
+        cp -rf $GITHUB_WORKSPACE/. openwrt/
+        cp -rf $GITHUB_WORKSPACE openwrt/
         cd openwrt
         chmod +x $GITHUB_WORKSPACE$DIY_P1_SH
         /bin/bash "$GITHUB_WORKSPACE$DIY_SH"
