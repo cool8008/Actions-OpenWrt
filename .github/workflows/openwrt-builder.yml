@@ -49,8 +49,6 @@ jobs:
           [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
           cd $rootdir
           }
-          
-        cd openwrt
         chmod +x $DIY_P1_SH
         /bin/bash "$DIY_SH"
         cp -f $GITHUB_WORKSPACE/.config
