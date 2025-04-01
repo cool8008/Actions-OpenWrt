@@ -89,19 +89,6 @@ jobs:
         sed -i "s/procd-ujail//" include/target.mk
         sed -i "s/^.*vermagic$/\techo '1' > \$(LINUX_DIR)\/.vermagic/" include/kernel-defaults.mk
 
-    - name: Patch KWRT Dependencies
-      run: |
-        cd openwrt
-        # 创建虚拟依赖包解决缺失依赖
-        mkdir -p package/feeds/kiddin9/virtual
-        cat > package/feeds/kiddin9/virtual/kmod-dummy/Makefile <<EOF
-        define KernelPackage/dummy
-        SUBMENU:=Virtual
-        TITLE:=Dummy module
-        KCONFIG:=CONFIG_DUMMY
-        endef
-        \$(eval \$(call KernelPackage,dummy))
-        EOF
 
         # 修复常见依赖问题
         for makefile in $(find package/feeds/kiddin9 -name Makefile); do
