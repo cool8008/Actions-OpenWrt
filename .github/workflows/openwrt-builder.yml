@@ -50,24 +50,84 @@ jobs:
           cd $rootdir
           }
         export -f git_clone_path
-        cp -rf $GITHUB_WORKSPACE. openwrt/
-        cp -rf $GITHUB_WORKSPACE/. openwrt/
+        
+        # 复制项目文件
         cp -rf $GITHUB_WORKSPACE openwrt/
         cd openwrt
-        chmod +x $GITHUB_WORKSPACE$DIY_P1_SH
-        /bin/bash "$GITHUB_WORKSPACE$DIY_SH"
-        cp -f $GITHUB_WORKSPACE/.config
-        if [ -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
-          echo >> .config
-          cat $GITHUB_WORKSPACE/$CONFIG_FILE >> .config
+
+        # 添加 KWRT 软件源
+        sed -i '$a src-git kiddin9 https://github.com/kiddin9/kwrt-packages.git;main' feeds.conf.default
+        sed -i "/telephony/d" feeds.conf.default
+
+        # 修改 feeds 配置
+        sed -i "s?targets/%S/packages?targets/%S/\$(LINUX_VERSION)?" include/feeds.mk
+        sed -i '/	refresh_config();/d' scripts/feeds
+
+        # 更新并安装 feeds
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a -p kiddin9 -f
+        ./scripts/feeds install -a
+
+        # 基础配置修改
+        sed --follow-symlinks -i "s#%C\"#%C by Kiddin'\"#" package/base-files/files/etc/os-release
+        sed -i -e '$a /etc/bench.log' \
+                -e '/\/etc\/profile/d' \
+                -e '/\/etc\/shinit/d' \
+                package/base-files/files/lib/upgrade/keep.d/base-files-essential
+        sed -i -e '/^\/etc\/profile/d' \
+                -e '/^\/etc\/shinit/d' \
+                package/base-files/Makefile
+        sed -i "s/192.168.1/10.0.0/" package/base-files/files/bin/config_generate
+
+        # 下载必要补丁
+        wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/openwrt-24.10/package/kernel/linux/modules/video.mk -P package/kernel/linux/modules/
+        wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/openwrt-24.10/package/network/utils/nftables/patches/002-nftables-add-fullcone-expression-support.patch -P package/network/utils/nftables/patches/
+        wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/openwrt-24.10/package/network/utils/nftables/patches/001-drop-useless-file.patch -P package/network/utils/nftables/patches/
+        wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/openwrt-24.10/package/libs/libnftnl/patches/001-libnftnl-add-fullcone-expression-support.patch -P package/libs/libnftnl/patches/
+        wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/openwrt-24.10/package/firmware/wireless-regdb/patches/600-custom-change-txpower-and-dfs.patch -P package/firmware/wireless-regdb/patches/
+        wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/master/config/Config-kernel.in -P config/
+
+        # 替换核心组件
+        rm -rf package/libs/openssl package/network/services/ppp
+        git_clone_path openwrt-24.10 https://github.com/immortalwrt/immortalwrt package/libs/openssl package/network/services/ppp
+
+        # 版本信息处理
+        echo "$(date +"%s")" >version.date
+        date=`date +%m.%d.%Y`
+        sed -i -e "/\(# \)\?REVISION:=/c\REVISION:=$date" -e '/VERSION_CODE:=/c\VERSION_CODE:=$(REVISION)' include/version.mk
+
+        # 构建系统调整
+        sed -i '/$(curdir)\/compile:/c\$(curdir)/compile: package/opkg/host/compile' package/Makefile
+        sed -i "s/DEFAULT_PACKAGES:=/DEFAULT_PACKAGES:=luci-app-advancedplus luci-app-firewall luci-app-package-manager luci-app-upnp luci-app-syscontrol luci-proto-wireguard luci-app-wizard luci-base luci-compat luci-lib-ipkg luci-lib-fs coremark wget-ssl curl autocore htop nano zram-swap kmod-lib-zstd kmod-tcp-bbr bash openssh-sftp-server block-mount resolveip ds-lite swconfig luci-app-fan luci-app-filemanager /" include/target.mk
+        sed -i "s/procd-ujail//" include/target.mk
+        sed -i "s/^.*vermagic$/\techo '1' > \$(LINUX_DIR)\/.vermagic/" include/kernel-defaults.mk
+
+        # 等待 KWRT 包构建完成
+        status=$(curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -s "https://api.github.com/repos/kiddin9/kwrt-packages/actions/runs" | jq -r '.workflow_runs[0].status')
+        echo "$status"
+        while [[ "$status" == "in_progress" || "$status" == "queued" ]];do
+          echo "wait 5s"
+          sleep 5
+          status=$(curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -s "https://api.github.com/repos/kiddin9/kwrt-packages/actions/runs" | jq -r '.workflow_runs[0].status')
+        done
+
+        # 其他调整
+        mv -f feeds/kiddin9/r81* tmp/
+        wget -N https://raw.githubusercontent.com/openwrt/packages/master/lang/golang/golang/Makefile -P feeds/packages/lang/golang/golang/
+        rm -rf package/system/fstools
+        git_clone_path master https://github.com/coolsnowwolf/lede mv target/linux/generic/hack-6.6 package/system/fstools
+        rm -rf target/linux/generic/hack-6.6/929-Revert-genetlink* target/linux/generic/hack-6.6/767-net-phy-realtek-add-led*
+        wget -N https://raw.githubusercontent.com/coolsnowwolf/lede/master/target/linux/generic/pending-6.6/613-netfilter_optional_tcp_window_check.patch -P target/linux/generic/pending-6.6/
+        sed -i 's/max_requests 3/max_requests 20/g' package/network/services/uhttpd/files/uhttpd.config
+        sed -i "s/tty\(0\|1\)::askfirst/tty\1::respawn/g" target/linux/*/base-files/etc/inittab
+        sed -i 's/option timeout 30/option timeout 60/g' package/system/rpcd/files/rpcd.config
+        sed -i 's#20) \* 1000#60) \* 1000#g' feeds/luci/modules/luci-base/htdocs/luci-static/resources/rpc.js
+
+        # 应用自定义配置
+        if [ -f "$GITHUB_WORKSPACE/.config" ]; then
+          cat $GITHUB_WORKSPACE/.config >> .config
         fi
-        if [ -f "$GITHUB_WORKSPACE/$DIY_SH" ]; then
-          chmod +x $GITHUB_WORKSPACE/$DIY_SH
-          echo "/bin/bash $GITHUB_WORKSPACE/$DIY_SH"
-          /bin/bash "$GITHUB_WORKSPACE/$DIY_SH"
-        fi
-        cp -Rf ./diy/* ./ || true
-        
+
     - name: Download Packages
       run: |
         cd openwrt
