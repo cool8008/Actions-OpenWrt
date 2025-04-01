@@ -30,10 +30,30 @@ jobs:
     - name: Configure Build
       run: |
         cd openwrt
-        cp diy/devices/common/diy/package/feeds.conf.default .
+        mkdir -p diy
+        if [ ! -d "diy/devices" ]; then
+          git clone --filter=blob:none --no-checkout https://github.com/kiddin9/Kwrt.git diy-temp
+          git -C diy-temp checkout 389060a43dc9812af124e225fb4dc17363944fa8 -- devices/common/diy
+          mv diy-temp/devices diy/
+          rm -rf diy-temp
+        fi
+        if [ -f "diy/devices/common/diy/package/feeds.conf.default" ]; then
+          cp diy/devices/common/diy/package/feeds.conf.default .
+          else
+          cat > feeds.conf.default <<EOF
+             src-git packages https://github.com/coolsnowwolf/packages
+             src-git luci https://github.com/coolsnowwolf/luci
+             src-git routing https://github.com/coolsnowwolf/routing
+             src-git telephony https://github.com/coolsnowwolf/telephony
+          EOF
+        fi
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        [ -f diy/config ] && cp diy/config .config
+        if [ -f "diy/config" ]; then
+          cp diy/config .config
+          elif [ -f "diy/devices/common/diy/package/config" ]; then
+          cp diy/devices/common/diy/package/config .config
+        fi
 
     - name: Download Packages
       run: |
