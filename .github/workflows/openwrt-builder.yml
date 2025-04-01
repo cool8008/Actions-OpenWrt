@@ -26,63 +26,11 @@ jobs:
 
     - name: Setup Environment
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential ccache cmake cpio curl g++-multilib gawk gettext \
-          git libncurses-dev libssl-dev python3 python3-pip rsync unzip wget jq
-        sudo pip3 install pyyaml
-
-    - name: Clone LEDE Source
-      run: |
-        [ "${{ inputs.clean_build }}" = "true" ] && rm -rf openwrt || true
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_SH
         cd openwrt
-        git submodule update --init --recursive
-
-    - name: Load custom configuration
-      run: |
-        function git_clone_path() {
-          trap 'rm -rf "$tmpdir"' EXIT
-          branch="$1" rurl="$2" mv="$3"
-          [[ "$mv" != "mv" ]] && shift 2 || shift 3
-          rootdir="$PWD"
-          tmpdir="$(mktemp -d)" || exit 1
-          if [ ${#branch} -lt 10 ]; then
-          git clone -b "$branch" --depth 1 --filter=blob:none --sparse "$rurl" "$tmpdir"
-          cd "$tmpdir"
-          else
-          git clone --filter=blob:none --sparse "$rurl" "$tmpdir"
-          cd "$tmpdir"
-          git checkout $branch
-          fi
-          if [ "$?" != 0 ]; then
-            echo "error on $rurl"
-            exit 1
-          fi
-          git sparse-checkout init --cone
-          git sparse-checkout set $@
-          [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
-          cd $rootdir
-          }
-        export -f git_clone_path
-        cp -rf devices/common/. openwrt/
-        cp -rf devices/${{matrix.target}}/. openwrt/
-        cp -rf devices openwrt/
-        cd openwrt
-        chmod +x devices/common/$DIY_SH
-        /bin/bash "devices/common/$DIY_SH"
-        cp -f devices/common/$CONFIG_FILE .config
-        if [ -f "devices/${{matrix.target}}/$CONFIG_FILE" ]; then
-          echo >> .config
-          cat devices/${{matrix.target}}/$CONFIG_FILE >> .config
-        fi
-        if [ -f "devices/${{matrix.target}}/$DIY_SH" ]; then
-          chmod +x devices/${{matrix.target}}/$DIY_SH
-          echo "/bin/bash devices/${{matrix.target}}/$DIY_SH"
-          /bin/bash "devices/${{matrix.target}}/$DIY_SH"
-        fi
-        cp -Rf ./diy/* ./ || true
-
+        $GITHUB_WORKSPACE/$DIY_SH
+        
     - name: Download Packages
       run: |
         cd openwrt
