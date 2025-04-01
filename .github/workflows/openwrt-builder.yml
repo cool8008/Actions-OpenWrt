@@ -49,8 +49,8 @@ jobs:
           [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
           cd $rootdir
           }
-        chmod +x $DIY_P1_SH
-        /bin/bash "$DIY_SH"
+        chmod +x $GITHUB_WORKSPACE$DIY_P1_SH
+        /bin/bash "$GITHUB_WORKSPACE$DIY_SH"
         cp -f $GITHUB_WORKSPACE/.config
         if [ -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
           echo >> .config
