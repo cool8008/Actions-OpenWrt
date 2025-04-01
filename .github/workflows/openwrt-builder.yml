@@ -1,4 +1,4 @@
-name: OpenWrt Builder with KWRT Packages (Optimized)
+name: OpenWrt Build with Space Optimization & Artifact Upload
 
 on:
   workflow_dispatch:
@@ -10,162 +10,94 @@ on:
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  KWRT_PKG_URL: https://github.com/kiddin9/kwrt-packages.git
-  IMMORTALWRT_BRANCH: openwrt-24.10
+  KWRT_PKG: https://github.com/kiddin9/kwrt-packages.git
+  BUILD_DIR: openwrt
+  ARTIFACT_NAME: openwrt-bin-${{ github.run_id }}
+  MAX_CCACHE_SIZE: 2G
   TZ: Asia/Shanghai
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 240
+    timeout-minutes: 180
 
     steps:
+    # 磁盘空间优化部分
+    - name: Setup Disk Space
+      run: |
+        # 清理系统缓存
+        sudo swapoff -a && sudo rm -f /swapfile
+        sudo apt-get clean
+        docker rmi -f $(docker images -aq) || true
+        
+        # 创建虚拟内存
+        sudo fallocate -l 4G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
 
-    - name: Checkout Code
+    - name: Checkout with Space Saving
       uses: actions/checkout@v4
-
-    - name: Clone Source (Optimized)
-      run: |
-        # 使用深度优化的克隆方式
-        git clone --depth=1 --filter=tree:0 \
-          --sparse ${{ env.REPO_URL }} openwrt
-        cd openwrt
-        git sparse-checkout set \
-          package \
-          feeds \
-          scripts \
-          include \
-          tools \
-          config \
-          target
-        
-        echo "::group::Repository Size"
-        du -sh .
-        echo "::endgroup::"
-
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential ccache git libncurses-dev zlib1g-dev \
-          python3 python3-setuptools rsync unzip wget
-
-    - name: Configure Feeds with KWRT
-      run: |
-        cd openwrt
-        echo "src-git kiddin9 https://github.com/kiddin9/kwrt-packages.git;main" >> feeds.conf.default
-        sed -i "/telephony/d" feeds.conf.default
-        
-        # 修改 feeds 配置
-        sed -i "s?targets/%S/packages?targets/%S/\$(LINUX_VERSION)?" include/feeds.mk
-        sed -i '/	refresh_config();/d' scripts/feeds
-
-        # 更新feeds（分步执行）
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a -p kiddin9 -f
-        ./scripts/feeds install -a
-
-    - name: Apply Core Modifications
-      run: |
-        cd openwrt
-        # 基础配置
-        sed -i "s/192.168.1/10.0.0/" package/base-files/files/bin/config_generate
-        sed --follow-symlinks -i "s#%C\"#%C by Kiddin'\"#" package/base-files/files/etc/os-release
-
-        # 下载必要补丁
-        wget -qN https://github.com/immortalwrt/immortalwrt/raw/${{ env.IMMORTALWRT_BRANCH }}/package/kernel/linux/modules/video.mk -P package/kernel/linux/modules/
-        wget -qN https://github.com/immortalwrt/immortalwrt/raw/${{ env.IMMORTALWRT_BRANCH }}/package/network/utils/nftables/patches/002-nftables-add-fullcone-expression-support.patch -P package/network/utils/nftables/patches/
-
-        # 替换核心组件
-        rm -rf package/libs/openssl package/network/services/ppp
-        git clone --depth 1 https://github.com/immortalwrt/immortalwrt -b ${{ env.IMMORTALWRT_BRANCH }} tmp-immortalwrt
-        cp -r tmp-immortalwrt/package/libs/openssl package/libs/
-        cp -r tmp-immortalwrt/package/network/services/ppp package/network/services/
-
-        # 构建系统调整
-        echo "$(date +%s)" > version.date
-        sed -i '/$(curdir)\/compile:/c\$(curdir)/compile: package/opkg/host/compile' package/Makefile
-        sed -i "s/procd-ujail//" include/target.mk
-        sed -i "s/^.*vermagic$/\techo '1' > \$(LINUX_DIR)\/.vermagic/" include/kernel-defaults.mk
-
-
-        # 修复常见依赖问题
-        for makefile in $(find package/feeds/kiddin9 -name Makefile); do
-          sed -i \
-            -e '/DEPENDS:=/s/kmod-[^ ]*//g' \
-            -e '/DEPENDS:=/s/v2ray-plugin//g' \
-            -e '/DEPENDS:=/s/nginx-mod-dav-ext//g' \
-            $makefile
-        done
-
-    - name: Configure Build
-      run: |
-        cd openwrt
-        # 最小化初始配置
-        cat > .config <<EOF
-        CONFIG_TARGET_x86_64=y
-        CONFIG_TARGET_x86_64_DEVICE_generic=y
-        CONFIG_CCACHE=y
-        CONFIG_BUILDBOT=y
-        EOF
-        
-        # 应用自定义配置
-        [ -f $GITHUB_WORKSPACE/${{ env.CONFIG_FILE }} ] && cat $GITHUB_WORKSPACE/${{ env.CONFIG_FILE }} >> .config
-        make defconfig
-
-    - name: Build Stage 1 - Toolchain
-      run: |
-        cd openwrt
-        echo "::group::Building Toolchain"
-        make -j$(($(nproc)/2)) tools/compile || make -j1 V=s tools/compile
-        make -j$(($(nproc)/2)) toolchain/compile || make -j1 V=s toolchain/compile
-        echo "::endgroup::"
-        
-        # 清理临时文件
-        find build_dir -name "*.o" -delete
-        rm -rf build_dir/toolchain-*/.built
-
-    - name: Build Stage 2 - Kernel
-      run: |
-        cd openwrt
-        echo "::group::Building Kernel"
-        make -j$(($(nproc)/2)) target/linux/compile || make -j1 V=s target/linux/compile
-        echo "::endgroup::"
-        
-        # 清理内核构建文件
-        rm -rf build_dir/target-*/linux-*/linux-*
-
-    - name: Build Stage 3 - Packages
-      run: |
-        cd openwrt
-        # 分批编译关键包
-        for pkg_section in base libs luci network; do
-          echo "::group::Building $pkg_section packages"
-          make -j$(($(nproc)/2)) package/$pkg_section/compile || \
-            make -j1 V=s package/$pkg_section/compile
-          echo "::endgroup::"
-          
-          # 每批完成后清理
-          find build_dir -name "*.o" -exec rm {} +
-          find staging_dir -name "*.a" -exec rm {} +
-        done
-
-    - name: Build Final Image
-      run: |
-        cd openwrt
-        echo "::group::Creating Final Image"
-        make -j1 image || make -j1 V=s image
-        echo "::endgroup::"
-        
-        DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | \
-          sed -r 's/.*DEVICE_(.*)=y/\1/' || echo "generic")
-        echo "DEVICE_NAME=${DEVICE_NAME}" >> $GITHUB_ENV
-        echo "BUILD_DATE=$(date +%Y%m%d-%H%M)" >> $GITHUB_ENV
-
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
       with:
-        name: openwrt-${{ env.DEVICE_NAME }}-${{ env.BUILD_DATE }}
-        path: openwrt/bin/targets
+        sparse-checkout: |
+          config/
+          feeds.conf.default
+          package/
+        fetch-depth: 1
+
+    - name: Smart Source Clone
+      run: |
+        [ -d $BUILD_DIR ] || git clone --depth 1 --filter=blob:none \
+          --sparse $REPO_URL $BUILD_DIR
+        cd $BUILD_DIR
+        git sparse-checkout set \
+          package feeds scripts config
+
+    # 编译过程优化
+    - name: Optimized Build Setup
+      run: |
+        cd $BUILD_DIR
+        # 磁盘敏感型配置
+        echo "CONFIG_AUTOREMOVE=y" >> .config
+        echo "CONFIG_CCACHE_COMPRESS=y" >> .config
+        sed -i "s|tmp/.ccache|${{ github.workspace }}/.ccache|" rules.mk
+        
+        # 限制ccache大小
+        ccache -M $MAX_CCACHE_SIZE
+        ccache -s
+
+    - name: Build Process
+      run: |
+        cd $BUILD_DIR
+        [ "${{ inputs.clean_build }}" = "true" ] && make clean
+        
+        # 分段构建节省内存
+        make -j$(nproc) tools/install
+        make -j$(nproc) toolchain/install
+        
+        # 主构建过程
+        make -j$(($(nproc)/2)) \
+          CONFIG_AUTOREMOVE=y \
+          CONFIG_DEBUG_SECTION_MISMATCH=y
+        
+        # 立即清理中间文件
+        find build_dir -name '*.o' -delete
+        rm -rf logs/ tmp/
+
+    # 固件处理与上传
+    - name: Package Artifacts
+      run: |
+        cd $BUILD_DIR/bin/targets
+        find . -name '*.bin' -exec ls -lh {} \;
+        
+        # 创建带日期的压缩包
+        TIMESTAMP=$(date +%Y%m%d-%H%M)
+        tar --exclude='*.manifest' --exclude='*.buildinfo' \
+          -czvf $ARTIFACT_NAME-$TIMESTAMP.tar.gz */**
+
+    - name: Upload Firmware
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ env.ARTIFACT_NAME }}
+        path: ${{ env.BUILD_DIR }}/bin/targets/${{ env.ARTIFACT_NAME }}*.tar.gz
         retention-days: 7
