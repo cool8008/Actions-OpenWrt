@@ -2,11 +2,6 @@ name: OpenWrt Build with KWRT Fix
 
 on:
   workflow_dispatch:
-    inputs:
-      clean_build:
-        description: 'Perform clean build'
-        required: false
-        default: 'false'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
