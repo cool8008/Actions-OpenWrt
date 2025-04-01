@@ -21,16 +21,6 @@ jobs:
     timeout-minutes: 240
 
     steps:
-    - name: Initialize ZRAM Swap
-      run: |
-        # 设置4GB ZRAM交换空间
-        sudo modprobe zram num_devices=1
-        echo $((4*1024*1024*1024)) | sudo tee /sys/block/zram0/disksize
-        sudo mkswap /dev/zram0
-        sudo swapon -p 100 /dev/zram0
-        echo "::group::Memory Status"
-        free -h
-        echo "::endgroup::"
 
     - name: Checkout Code
       uses: actions/checkout@v4
