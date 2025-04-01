@@ -53,19 +53,6 @@ jobs:
         git sparse-checkout set \
           package feeds scripts config
 
-    # 编译过程优化
-    - name: Optimized Build Setup
-      run: |
-        cd $BUILD_DIR
-        # 磁盘敏感型配置
-        echo "CONFIG_AUTOREMOVE=y" >> .config
-        echo "CONFIG_CCACHE_COMPRESS=y" >> .config
-        sed -i "s|tmp/.ccache|${{ github.workspace }}/.ccache|" rules.mk
-        
-        # 限制ccache大小
-        ccache -M $MAX_CCACHE_SIZE
-        ccache -s
-
     - name: Build Process
       run: |
         cd $BUILD_DIR
