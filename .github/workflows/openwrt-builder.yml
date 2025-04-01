@@ -2,6 +2,11 @@ name: OpenWrt Build with KWRT Fix
 
 on:
   workflow_dispatch:
+    inputs:
+      clean_build:
+        description: 'Perform clean build'
+        required: false
+        default: 'false'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
@@ -37,12 +42,11 @@ jobs:
     - name: Configure Feeds
       run: |
         cd openwrt
-        # 添加并修改feeds配置
+
         echo "src-git kiddin9 ${{ env.KWRT_FEED_URL }};main" >> feeds.conf.default
         sed -i "/telephony/d; s?targets/%S/packages?targets/%S/\$(LINUX_VERSION)?" feeds.conf.default
         sed -i '/refresh_config();/d' scripts/feeds
 
-        # 更新并安装feeds
         ./scripts/feeds update -a
         ./scripts/feeds install -a -p kiddin9 -f
         ./scripts/feeds install -a
@@ -50,59 +54,50 @@ jobs:
     - name: Fix Core Dependencies
       run: |
         cd openwrt
-        # 安装关键依赖
+      
         ./scripts/feeds install \
-          kmod-media-core \
-          kmod-gobinet \
-          kmod-sprd_pcie \
-          v2ray-plugin \
-          minisign \
-          shadowsocks-rust \
-          nginx-mod-dav-ext \
-          xray-geodata \
-          ChinaDNS
+        kmod-media-core \
+        kmod-gobinet \
+        kmod-sprd_pcie \
+        v2ray-plugin \
+        minisign \
+        shadowsocks-rust \
+        nginx-mod-dav-ext \
+        xray-geodata \
+        ChinaDNS
 
-        # 修复libbpf依赖
         if [ ! -d "package/libs/libbpf" ]; then
           git clone https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git --depth=1
           mkdir -p package/libs/libbpf
           cp -r bpf-next/tools/lib/bpf/* package/libs/libbpf/
           cat > package/libs/libbpf/Makefile <<EOF
-include \$(TOPDIR)/rules.mk
+          include \$(TOPDIR)/rules.mk
 
-PKG_NAME:=libbpf
-PKG_VERSION:=0.8.0
-PKG_RELEASE:=1
+          PKG_NAME:=libbpf
+          PKG_VERSION:=0.8.0
+          PKG_RELEASE:=1
 
-PKG_SOURCE_URL:=file://\$(CURDIR)/bpf-next
-PKG_SOURCE_PROTO:=git
-PKG_MIRROR_HASH:=skip
+          PKG_SOURCE_URL:=file://\$(CURDIR)/bpf-next
+          PKG_SOURCE_PROTO:=git
+          PKG_MIRROR_HASH:=skip
 
-include \$(INCLUDE_DIR)/package.mk
+          include \$(INCLUDE_DIR)/package.mk
 
-define Package/libbpf
-  SECTION:=libs
-  CATEGORY:=Libraries
-  TITLE:=BPF CO-RE library
-  DEPENDS:=+libelf
-endef
+          define Package/libbpf
+          SECTION:=libs
+          CATEGORY:=Libraries
+          TITLE:=BPF CO-RE library
+          DEPENDS:=+libelf
+          endef
 
-define Build/Compile
-  \$(MAKE) -C \$(PKG_BUILD_DIR) \
-    CC="\$(TARGET_CC)" \
-    AR="\$(TARGET_AR)" \
-    CFLAGS="\$(TARGET_CFLAGS)" \
-    all
-endef
-
-define Package/libbpf/install
-	\$(INSTALL_DIR) \$(1)/usr/lib
-	\$(CP) \$(PKG_BUILD_DIR)/libbpf.a \$(1)/usr/lib/
-	\$(CP) \$(PKG_BUILD_DIR)/libbpf.so* \$(1)/usr/lib/
-endef
-
-\$(eval \$(call BuildPackage,libbpf))
-EOF
+          define Build/Compile
+          \$(MAKE) -C \$(PKG_BUILD_DIR) \
+          CC="\$(TARGET_CC)" \
+          AR="\$(TARGET_AR)" \
+          CFLAGS="\$(TARGET_CFLAGS)" \
+          all
+          endef
+          EOF
         fi
 
     - name: Patch Problematic Makefiles
@@ -180,3 +175,15 @@ EOF
         name: openwrt-${{ env.DEVICE_NAME }}-${{ env.BUILD_DATE }}
         path: openwrt/bin/targets/*/*
         retention-days: 7
+
+    - name: Telegram Notification
+      if: always()
+      env:
+        TG_TOKEN: ${{ secrets.TG_TOKEN }}
+        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      run: |
+        BUILD_STATUS=$([ ${{ job.status }} == 'success' ] && echo "✅ Success" || echo "❌ Failed")
+        curl -s -X POST \
+          -H "Content-Type: application/json" \
+          -d "{\"chat_id\":\"$TG_CHAT_ID\",\"text\":\"Build $BUILD_STATUS\nDevice: ${{ env.DEVICE_NAME }}\nDate: ${{ env.BUILD_DATE }}\nDetails: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\",\"parse_mode\":\"HTML\"}" \
+          https://api.telegram.org/bot$TG_TOKEN/sendMessage
