@@ -1,4 +1,4 @@
-name: OpenWrt Builder
+name: OpenWrt Builder with Kwrt Packages
 
 on:
   workflow_dispatch:
@@ -7,14 +7,12 @@ on:
         description: 'Perform clean build'
         required: false
         default: 'false'
-      config_profile:
-        description: 'Device profile (e.g. x86-64, raspberrypi)'
-        required: false
-        default: 'generic'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
+  KWRT_PKG_URL: https://github.com/kiddin9/kwrt-packages.git
+  IMMORTALWRT_BRANCH: openwrt-24.10
   TZ: Asia/Shanghai
 
 jobs:
@@ -31,61 +29,113 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y \
           build-essential ccache cmake cpio curl g++-multilib gawk gettext \
-          git libncurses-dev libssl-dev python3 python3-pip rsync unzip wget
+          git libncurses-dev libssl-dev python3 python3-pip rsync unzip wget jq
         sudo pip3 install pyyaml
 
-    - name: Prepare Workspace
+    - name: Clone LEDE Source
       run: |
-        if [ "${{ inputs.clean_build }}" = "true" ]; then
-          rm -rf /workdir/openwrt
-        fi
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
-
-    - name: Clone Source
-      working-directory: /workdir
-      run: |
+        [ "${{ inputs.clean_build }}" = "true" ] && rm -rf openwrt || true
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        cd openwrt
+        git submodule update --init --recursive
 
-    - name: Load Custom Configuration
+    - name: Apply Kwrt Customizations
       run: |
         cd openwrt
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF feeds.conf.default
         
-        if [ -f "$GITHUB_WORKSPACE/$DIY_P1_SH" ]; then
-          chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH"
-          "$GITHUB_WORKSPACE/$DIY_P1_SH"
-        fi
+        # 1. 添加Kwrt软件源
+        echo "::group::🔧 Adding Kwrt package feed"
+        sed -i '$a src-git kiddin9 $KWRT_PKG_URL;main' feeds.conf.default
+        sed -i "/telephony/d" feeds.conf.default
+        cat feeds.conf.default
+        echo "::endgroup::"
 
-    - name: Update Feeds
-      run: |
-        cd openwrt
+        # 2. 修改编译系统配置
+        echo "::group::⚙️ Modifying build system"
+        sed -i "s?targets/%S/packages?targets/%S/\$(LINUX_VERSION)?" include/feeds.mk
+        sed -i '/	refresh_config();/d' scripts/feeds
+        echo "::endgroup::"
+
+        # 3. 更新软件源
+        echo "::group::🔄 Updating feeds"
         ./scripts/feeds update -a
+        ./scripts/feeds install -a -p kiddin9 -f
         ./scripts/feeds install -a
+        echo "::endgroup::"
 
-    - name: Apply Device Config
-      run: |
-        cd openwrt
-        [ -e files ] && mv files openwrt/files
-        if [ -f "$GITHUB_WORKSPACE/$DIY_P2_SH" ]; then
-          chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
-          "$GITHUB_WORKSPACE/$DIY_P2_SH"
-        elif [ -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
-          mv "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
-        else
-          make defconfig
-        fi
+        # 4. 系统基础定制
+        echo "::group::🏗️ System customizations"
+        sed -i "s#%C\"#%C by Kiddin'\"#" package/base-files/files/etc/os-release
+        sed -i "s/192.168.1/10.0.0/" package/base-files/files/bin/config_generate
+        echo "::endgroup::"
+
+        # 5. 下载必要组件
+        echo "::group::📥 Downloading components"
+        mkdir -p {package/kernel/linux/modules,package/network/utils/nftables/patches}
+        mkdir -p {package/libs/libnftnl/patches,package/firmware/wireless-regdb/patches,config}
+        
+        components=(
+          "package/kernel/linux/modules/video.mk"
+          "package/network/utils/nftables/patches/002-nftables-add-fullcone-expression-support.patch"
+          "package/network/utils/nftables/patches/001-drop-useless-file.patch"
+          "package/libs/libnftnl/patches/001-libnftnl-add-fullcone-expression-support.patch"
+          "package/firmware/wireless-regdb/patches/600-custom-change-txpower-and-dfs.patch"
+          "config/Config-kernel.in"
+        )
+        
+        for component in "${components[@]}"; do
+          wget -qN "https://github.com/immortalwrt/immortalwrt/raw/refs/heads/$IMMORTALWRT_BRANCH/$component" -P "$(dirname $component)" || true
+        done
+        echo "::endgroup::"
+
+        # 6. 替换关键组件
+        echo "::group::🔄 Replacing core components"
+        rm -rf package/libs/openssl package/network/services/ppp
+        git clone --depth=1 -b $IMMORTALWRT_BRANCH \
+          https://github.com/immortalwrt/immortalwrt package/libs/openssl
+        git clone --depth=1 -b $IMMORTALWRT_BRANCH \
+          https://github.com/immortalwrt/immortalwrt package/network/services/ppp
+        echo "::endgroup::"
+
+        # 7. 编译优化
+        echo "::group::⚡ Build optimizations"
+        echo "$(date +"%s")" > version.date
+        sed -i '/$(curdir)\/compile:/c\$(curdir)/compile: package/opkg/host/compile' package/Makefile
+        
+        DEFAULT_PKGS="luci-app-advancedplus luci-app-firewall luci-app-package-manager \
+        luci-app-upnp luci-app-syscontrol luci-proto-wireguard luci-app-wizard \
+        luci-base luci-compat luci-lib-ipkg luci-lib-fs coremark wget-ssl curl \
+        autocore htop nano zram-swap kmod-lib-zstd kmod-tcp-bbr bash \
+        openssh-sftp-server block-mount resolveip ds-lite swconfig \
+        luci-app-fan luci-app-filemanager"
+        
+        sed -i "s/DEFAULT_PACKAGES:=/DEFAULT_PACKAGES:=$DEFAULT_PKGS /" include/target.mk
+        sed -i "s/procd-ujail//" include/target.mk
+        sed -i "s/^.*vermagic$/\techo '1' > \$(LINUX_DIR)\/.vermagic/" include/kernel-defaults.mk
+        echo "::endgroup::"
+
+        # 8. 其他优化
+        echo "::group::🎛️ System tuning"
+        sed -i 's/max_requests 3/max_requests 20/g' package/network/services/uhttpd/files/uhttpd.config
+        sed -i "s/tty\(0\|1\)::askfirst/tty\1::respawn/g" target/linux/*/base-files/etc/inittab
+        sed -i 's/option timeout 30/option timeout 60/g' package/system/rpcd/files/rpcd.config
+        echo "::endgroup::"
+
+        # 9. 品牌定制
+        echo "::group::🏷️ Branding customization"
+        sed -i "s/OpenWrt/LEDE/g" \
+          package/base-files/files/bin/config_generate \
+          package/base-files/image-config.in \
+          include/version.mk \
+          2>/dev/null || true
+        echo "::endgroup::"
 
     - name: Download Packages
-      id: package
       run: |
         cd openwrt
+        echo "::group::⬇️ Downloading packages"
         make defconfig
-        
-        # Three-stage download with retries
         for attempt in {1..3}; do
-          echo "Download attempt $attempt/3"
           if make -j$(($(nproc)*2)) download; then
             break
           elif [ $attempt -eq 3 ]; then
@@ -94,40 +144,25 @@ jobs:
           fi
           sleep 10
         done
+        echo "::endgroup::"
 
-    - name: Compile Firmware
-      id: compile
+    - name: Build Firmware
       run: |
         cd openwrt
-        echo "Using $(nproc) threads for compilation"
-        make -j$(nproc) || {
-          echo "Parallel build failed, retrying with single thread..."
+        echo "::group::🔨 Building firmware"
+        make -j$(($(nproc)+1)) || {
+          echo "::warning::Parallel build failed, retrying with single thread..."
           make -j1 V=s
         }
         
         DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' || echo "generic")
         echo "DEVICE_NAME=${DEVICE_NAME}" >> $GITHUB_ENV
         echo "BUILD_DATE=$(date +%Y%m%d-%H%M)" >> $GITHUB_ENV
+        echo "::endgroup::"
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
-      if: success()
       with:
         name: openwrt-${{ env.DEVICE_NAME }}-${{ env.BUILD_DATE }}
-        path: |
-          openwrt/bin/targets/*/*
-          openwrt/.config
+        path: openwrt/bin/targets/*/*
         retention-days: 7
-
-    - name: Create Release
-      if: success() && env.UPLOAD_RELEASE == 'true'
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: build-${{ env.BUILD_DATE }}
-        files: openwrt/bin/targets/*/*
-
-    - name: Cleanup
-      if: always()
-      run: |
-        df -hT
-        echo "Disk usage report completed"
