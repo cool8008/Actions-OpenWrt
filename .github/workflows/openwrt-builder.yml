@@ -24,11 +24,46 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Setup Environment
+    - name: Load custom configuration
       run: |
-        chmod +x $DIY_SH
+        function git_clone_path() {
+          trap 'rm -rf "$tmpdir"' EXIT
+          branch="$1" rurl="$2" mv="$3"
+          [[ "$mv" != "mv" ]] && shift 2 || shift 3
+          rootdir="$PWD"
+          tmpdir="$(mktemp -d)" || exit 1
+          if [ ${#branch} -lt 10 ]; then
+          git clone -b "$branch" --depth 1 --filter=blob:none --sparse "$rurl" "$tmpdir"
+          cd "$tmpdir"
+          else
+          git clone --filter=blob:none --sparse "$rurl" "$tmpdir"
+          cd "$tmpdir"
+          git checkout $branch
+          fi
+          if [ "$?" != 0 ]; then
+            echo "error on $rurl"
+            exit 1
+          fi
+          git sparse-checkout init --cone
+          git sparse-checkout set $@
+          [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
+          cd $rootdir
+          }
+          
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_SH
+        chmod +x $DIY_P1_SH
+        /bin/bash "$DIY_SH"
+        cp -f $GITHUB_WORKSPACE/.config
+        if [ -f "devices/${{matrix.target}}/$CONFIG_FILE" ]; then
+          echo >> .config
+          cat devices/${{matrix.target}}/$CONFIG_FILE >> .config
+        fi
+        if [ -f "devices/${{matrix.target}}/$DIY_SH" ]; then
+          chmod +x devices/${{matrix.target}}/$DIY_SH
+          echo "/bin/bash devices/${{matrix.target}}/$DIY_SH"
+          /bin/bash "devices/${{matrix.target}}/$DIY_SH"
+        fi
+        cp -Rf ./diy/* ./ || true
         
     - name: Download Packages
       run: |
