@@ -1,4 +1,4 @@
-name: OpenWrt Build with Space Optimization & Artifact Upload
+name: OpenWrt Builder with Space Optimization
 
 on:
   workflow_dispatch:
@@ -10,81 +10,183 @@ on:
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
-  KWRT_PKG: https://github.com/kiddin9/kwrt-packages.git
-  BUILD_DIR: openwrt
-  ARTIFACT_NAME: openwrt-bin-${{ github.run_id }}
-  MAX_CCACHE_SIZE: 2G
+  REPO_BRANCH: master
+  KWRT_PKG_URL: https://github.com/kiddin9/kwrt-packages.git
   TZ: Asia/Shanghai
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
-    # 磁盘空间优化部分
-    - name: Setup Disk Space
+    - name: Initialize ZRAM Swap
       run: |
-        # 清理系统缓存
-        sudo swapoff -a && sudo rm -f /swapfile
-        sudo apt-get clean
-        docker rmi -f $(docker images -aq) || true
-        
-        # 创建虚拟内存
-        sudo fallocate -l 4G /swapfile
-        sudo chmod 600 /swapfile
-        sudo mkswap /swapfile
-        sudo swapon /swapfile
+        # 启用4GB ZRAM交换空间
+        sudo modprobe zram num_devices=1
+        echo $((4*1024*1024*1024)) | sudo tee /sys/block/zram0/disksize
+        sudo mkswap /dev/zram0
+        sudo swapon -p 100 /dev/zram0
+        echo "::group::Memory Status"
+        free -h
+        echo "::endgroup::"
 
-    - name: Checkout with Space Saving
+    - name: Checkout Code
       uses: actions/checkout@v4
-      with:
-        sparse-checkout: |
-          config/
-          feeds.conf.default
-          package/
-        fetch-depth: 1
 
-    - name: Smart Source Clone
+    - name: Clone Source (Optimized)
       run: |
-        [ -d $BUILD_DIR ] || git clone --depth 1 --filter=blob:none \
-          --sparse $REPO_URL $BUILD_DIR
-        cd $BUILD_DIR
+        # 智能克隆策略
+        git clone --depth=1 --filter=tree:0 \
+          --sparse ${{ env.REPO_URL }} openwrt
+        cd openwrt
         git sparse-checkout set \
-          package feeds scripts config
+          package \
+          feeds \
+          scripts \
+          include \
+          tools \
+          config \
+          target
+        
+        # 显示初始空间占用
+        echo "::group::Initial Repository Size"
+        du -sh .
+        echo "::endgroup::"
 
-    - name: Build Process
+    - name: Install Dependencies
       run: |
-        cd $BUILD_DIR
-        [ "${{ inputs.clean_build }}" = "true" ] && make clean
-        
-        # 分段构建节省内存
-        make -j$(nproc) tools/install
-        make -j$(nproc) toolchain/install
-        
-        # 主构建过程
-        make -j$(($(nproc)/2)) \
-          CONFIG_AUTOREMOVE=y \
-          CONFIG_DEBUG_SECTION_MISMATCH=y
-        
-        # 立即清理中间文件
-        find build_dir -name '*.o' -delete
-        rm -rf logs/ tmp/
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential ccache libncurses-dev zlib1g-dev \
+          python3 python3-setuptools rsync unzip
 
-    # 固件处理与上传
-    - name: Package Artifacts
+    - name: Configure Feeds with Space Saving
       run: |
-        cd $BUILD_DIR/bin/targets
-        find . -name '*.bin' -exec ls -lh {} \;
+        cd openwrt
+        # 动态配置feeds
+        echo "src-git kiddin9 https://github.com/kiddin9/kwrt-packages.git;;main" >> feeds.conf.default
+        ./scripts/feeds update -a
         
-        # 创建带日期的压缩包
-        TIMESTAMP=$(date +%Y%m%d-%H%M)
-        tar --exclude='*.manifest' --exclude='*.buildinfo' \
-          -czvf $ARTIFACT_NAME-$TIMESTAMP.tar.gz */**
+        # 选择性安装必要包
+        ./scripts/feeds install -a -p kiddin9 \
+          luci-app-passwall \
+          luci-app-ssr-plus \
+          luci-theme-material
+        
+        # 最小化基础安装
+        ./scripts/feeds install \
+          busybox dnsmasq firewall kmod-nft-offload
 
-    - name: Upload Firmware
+    - name: Apply Optimized Configuration
+      run: |
+        cd openwrt
+        # 启用压缩选项
+        cat >> .config <<EOF
+        CONFIG_TARGET_ROOTFS_SQUASHFS=y
+        CONFIG_TARGET_IMAGES_GZIP=y
+        CONFIG_KERNEL_ZSTD=y
+        CONFIG_DEVEL=y
+        CONFIG_CCACHE=y
+        CONFIG_CCACHE_DIR="/tmp/ccache"
+        CONFIG_CCACHE_BASEDIR="$(pwd)"
+        CONFIG_BUILD_LOG=y
+        EOF
+
+        # 空间优化配置
+        sed -i '/CONFIG_DEBUG_INFO/d' .config
+        echo "CONFIG_DEBUG_INFO=n" >> .config
+        echo "CONFIG_COLLECT_KERNEL_DEBUG=n" >> .config
+
+    - name: Setup Caching
+      uses: actions/cache@v3
+      with:
+        path: |
+          openwrt/dl
+          /tmp/ccache
+        key: ${{ runner.os }}-openwrt-${{ hashFiles('openwrt/feeds.conf.default') }}
+
+    - name: Download Packages
+      run: |
+        cd openwrt
+        # 分块下载策略
+        for PKG_CAT in base packages luci; do
+          make package/$PKG_CAT/download -j$(nproc)
+          find dl -size -1k -delete
+        done
+
+    - name: Build Stage 1 - Toolchain
+      run: |
+        cd openwrt
+        echo "::group::Building Toolchain"
+        make tools/compile toolchain/compile -j$(($(nproc)/2))
+        echo "::endgroup::"
+        
+        # 清理临时文件
+        rm -rf build_dir/toolchain-*/.built
+
+    - name: Build Stage 2 - Kernel
+      run: |
+        cd openwrt
+        echo "::group::Building Kernel"
+        make target/linux/compile -j$(($(nproc)/2))
+        echo "::endgroup::"
+        
+        # 清理内核中间文件
+        find build_dir -name "*.o" -delete
+        rm -rf build_dir/target-*/linux-*/linux-*
+
+    - name: Build Stage 3 - Packages
+      run: |
+        cd openwrt
+        # 分批次编译
+        for PKG_GROUP in base libs network luci; do
+          echo "::group::Building $PKG_GROUP packages"
+          make package/$PKG_GROUP/compile -j$(($(nproc)/2))
+          echo "::endgroup::"
+          
+          # 及时清理
+          find build_dir -name "*.o" -delete
+          find staging_dir -name "*.a" -delete
+          ccache -c
+        done
+
+    - name: Build Final Image
+      run: |
+        cd openwrt
+        echo "::group::Generating Image"
+        make -j1 image \
+          FILES_REMOVE="/usr/lib/debug /usr/lib/opkg /usr/share/man" \
+          IMAGE_ROOTFS_EXTRA_SPACE=0
+        echo "::endgroup::"
+        
+        # 生成版本信息
+        DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | cut -d_ -f4)
+        echo "DEVICE_NAME=${DEVICE_NAME:-generic}" >> $GITHUB_ENV
+        echo "BUILD_DATE=$(date +%Y%m%d-%H%M)" >> $GITHUB_ENV
+
+    - name: Post-Build Cleanup
+      run: |
+        cd openwrt
+        # 最终清理
+        rm -rf build_dir staging_dir tmp
+        ccache -c
+        
+        # 空间验证
+        echo "::group::Final Disk Usage"
+        df -h
+        du -sh bin/*
+        echo "::endgroup::"
+
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ env.ARTIFACT_NAME }}
-        path: ${{ env.BUILD_DIR }}/bin/targets/${{ env.ARTIFACT_NAME }}*.tar.gz
-        retention-days: 7
+        name: openwrt-${{ env.DEVICE_NAME }}-${{ env.BUILD_DATE }}
+        path: openwrt/bin/targets
+        retention-days: 1
+
+    - name: Cleanup ZRAM
+      if: always()
+      run: |
+        sudo swapoff /dev/zram0
+        sudo rmmod zram
