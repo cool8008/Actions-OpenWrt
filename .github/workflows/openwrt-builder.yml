@@ -1,45 +1,40 @@
-name: OpenWrt Builder with KWRT Packages
+name: OpenWrt Build with KWRT Fix
 
 on:
-  repository_dispatch:
   workflow_dispatch:
+    inputs:
+      clean_build:
+        description: 'Perform clean build'
+        required: false
+        default: 'false'
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
-  KWRT_PKG_URL: https://github.com/kiddin9/kwrt-packages.git
+  KWRT_FEED_URL: https://github.com/kiddin9/kwrt-packages.git
   IMMORTALWRT_BRANCH: openwrt-24.10
   TZ: Asia/Shanghai
-  FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: .config
-  UPLOAD_RELEASE: true
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
-    - name: Checkout
+    - name: Checkout Code
       uses: actions/checkout@v4
       with:
         submodules: recursive
 
-    - name: Initialize Environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
+    - name: Setup Build Environment
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install \
-          ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext git \
-          gperf haveged help2man libncurses-dev libssl-dev libtool lrzsz mkisofs ninja-build \
-          p7zip p7zip-full patch pkgconf python3 python3-pip python3-setuptools qemu-utils \
-          rsync scons squashfs-tools subversion swig texinfo uglifyjs unzip vim wget xmlto xxd zlib1g-dev
-        sudo timedatectl set-timezone "$TZ"
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential ccache ecj fastjar file g++ gawk gettext git \
+          libelf-dev libncurses5-dev libssl-dev rsync unzip wget zlib1g-dev \
+          python3 python3-distutils python3-setuptools
 
-    - name: Clone Source
+    - name: Clone OpenWrt Source
       run: |
         git clone --depth 1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
         cd openwrt
@@ -47,76 +42,130 @@ jobs:
     - name: Configure Feeds
       run: |
         cd openwrt
-        # 添加 KWRT 软件源
-        sed -i '$a src-git kiddin9 ${{ env.KWRT_PKG_URL }};main' ${{ env.FEEDS_CONF }}
-        sed -i "/telephony/d" ${{ env.FEEDS_CONF }}
+        # 添加并修改feeds配置
+        echo "src-git kiddin9 ${{ env.KWRT_FEED_URL }};main" >> feeds.conf.default
+        sed -i "/telephony/d; s?targets/%S/packages?targets/%S/\$(LINUX_VERSION)?" feeds.conf.default
+        sed -i '/refresh_config();/d' scripts/feeds
 
-        # 修改 feeds 配置
-        sed -i "s?targets/%S/packages?targets/%S/\$(LINUX_VERSION)?" include/feeds.mk
-        sed -i '/	refresh_config();/d' scripts/feeds
-
-    - name: Update and Install Feeds
-      run: |
-        cd openwrt
+        # 更新并安装feeds
         ./scripts/feeds update -a
         ./scripts/feeds install -a -p kiddin9 -f
         ./scripts/feeds install -a
 
-    - name: Apply Core Modifications
+    - name: Fix Core Dependencies
       run: |
         cd openwrt
-        # 基础配置
-        sed -i "s/192.168.1/10.0.0/" package/base-files/files/bin/config_generate
-        sed --follow-symlinks -i "s#%C\"#%C by Kiddin'\"#" package/base-files/files/etc/os-release
+        # 安装关键依赖
+        ./scripts/feeds install \
+          kmod-media-core \
+          kmod-gobinet \
+          kmod-sprd_pcie \
+          v2ray-plugin \
+          minisign \
+          shadowsocks-rust \
+          nginx-mod-dav-ext \
+          xray-geodata \
+          ChinaDNS
 
-        # 下载补丁文件
-        wget -qN https://github.com/immortalwrt/immortalwrt/raw/${{ env.IMMORTALWRT_BRANCH }}/package/kernel/linux/modules/video.mk -P package/kernel/linux/modules/
-        wget -qN https://github.com/immortalwrt/immortalwrt/raw/${{ env.IMMORTALWRT_BRANCH }}/package/network/utils/nftables/patches/002-nftables-add-fullcone-expression-support.patch -P package/network/utils/nftables/patches/
+        # 修复libbpf依赖
+        if [ ! -d "package/libs/libbpf" ]; then
+          git clone https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git --depth=1
+          mkdir -p package/libs/libbpf
+          cp -r bpf-next/tools/lib/bpf/* package/libs/libbpf/
+          cat > package/libs/libbpf/Makefile <<EOF
+include \$(TOPDIR)/rules.mk
 
-        # 替换核心组件
-        rm -rf package/libs/openssl package/network/services/ppp
-        git clone --depth 1 https://github.com/immortalwrt/immortalwrt -b ${{ env.IMMORTALWRT_BRANCH }} tmp-immortalwrt
-        cp -r tmp-immortalwrt/package/libs/openssl package/libs/
-        cp -r tmp-immortalwrt/package/network/services/ppp package/network/services/
+PKG_NAME:=libbpf
+PKG_VERSION:=0.8.0
+PKG_RELEASE:=1
 
-        # 构建系统调整
-        echo "$(date +%s)" > version.date
-        sed -i '/$(curdir)\/compile:/c\$(curdir)/compile: package/opkg/host/compile' package/Makefile
-        sed -i "s/procd-ujail//" include/target.mk
-        sed -i "s/^.*vermagic$/\techo '1' > \$(LINUX_DIR)\/.vermagic/" include/kernel-defaults.mk
+PKG_SOURCE_URL:=file://\$(CURDIR)/bpf-next
+PKG_SOURCE_PROTO:=git
+PKG_MIRROR_HASH:=skip
 
-    - name: Wait for KWRT Build
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+include \$(INCLUDE_DIR)/package.mk
+
+define Package/libbpf
+  SECTION:=libs
+  CATEGORY:=Libraries
+  TITLE:=BPF CO-RE library
+  DEPENDS:=+libelf
+endef
+
+define Build/Compile
+  \$(MAKE) -C \$(PKG_BUILD_DIR) \
+    CC="\$(TARGET_CC)" \
+    AR="\$(TARGET_AR)" \
+    CFLAGS="\$(TARGET_CFLAGS)" \
+    all
+endef
+
+define Package/libbpf/install
+	\$(INSTALL_DIR) \$(1)/usr/lib
+	\$(CP) \$(PKG_BUILD_DIR)/libbpf.a \$(1)/usr/lib/
+	\$(CP) \$(PKG_BUILD_DIR)/libbpf.so* \$(1)/usr/lib/
+endef
+
+\$(eval \$(call BuildPackage,libbpf))
+EOF
+        fi
+
+    - name: Patch Problematic Makefiles
       run: |
         cd openwrt
-        status=$(curl -sH "Authorization: token $GITHUB_TOKEN" \
-          "https://api.github.com/repos/kiddin9/kwrt-packages/actions/runs" | jq -r '.workflow_runs[0].status')
+        # 修复内核模块依赖
+        sed -i '/DEPENDS:=.*kmod-media-core/d' package/kernel/linux/Makefile
         
-        while [[ "$status" == "in_progress" || "$status" == "queued" ]]; do
-          echo "KWRT build status: $status, waiting..."
-          sleep 60
-          status=$(curl -sH "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/kiddin9/kwrt-packages/actions/runs" | jq -r '.workflow_runs[0].status')
+        # 修复其他包的依赖
+        for pkg in \
+          luci-app-antiblock \
+          luci-app-bypass \
+          luci-app-dnscrypt-proxy2 \
+          luci-app-gobinetmodem \
+          luci-app-passwall \
+          luci-app-passwall2 \
+          luci-app-school \
+          luci-app-spdmodem \
+          luci-app-ssr-plus \
+          luci-app-ssrust \
+          luci-app-webdav \
+          luci-app-xjay \
+          openwrt-dist-luci \
+          openwrt-einat-ebpf
+        do
+          find package/feeds/kiddin9/$pkg -name Makefile | xargs sed -i \
+            -e '/DEPENDS:=.*antiblock/d' \
+            -e '/DEPENDS:=.*v2ray-plugin/d' \
+            -e '/DEPENDS:=.*minisign/d' \
+            -e '/DEPENDS:=.*rkp-ipid/d' \
+            -e '/DEPENDS:=.*shadowsocks-rust-config/d' \
+            -e '/DEPENDS:=.*nginx-mod-dav-ext/d' \
+            -e '/DEPENDS:=.*xray-geodata/d' \
+            -e '/DEPENDS:=.*ChinaDNS/d' \
+            -e '/DEPENDS:=.*libbpf/d'
         done
 
-    - name: Configure Build
+        # 补充缺失的包
+        [ ! -d "package/feeds/kiddin9/rkp-ipid" ] && \
+          svn export https://github.com/immortalwrt/packages/trunk/net/rkp-ipid package/feeds/kiddin9/rkp-ipid
+
+    - name: Final Configuration
       run: |
         cd openwrt
-        # 应用默认包配置
-        sed -i "s/DEFAULT_PACKAGES:=/DEFAULT_PACKAGES:=luci-app-advancedplus luci-app-firewall luci-app-package-manager luci-app-upnp luci-proto-wireguard /" include/target.mk
-
-        # 应用自定义配置
-        [ -f $GITHUB_WORKSPACE/${{ env.CONFIG_FILE }} ] && cp $GITHUB_WORKSPACE/${{ env.CONFIG_FILE }} .config
+        # 应用基础配置
+        echo "$(date +%s)" > version.date
+        sed -i "s/192.168.1/10.0.0/" package/base-files/files/bin/config_generate
+        sed -i "s/OpenWrt/Kwrt/g" package/base-files/files/bin/config_generate
+        echo "CONFIG_ALL=y" >> .config
         make defconfig
 
     - name: Download Packages
       run: |
         cd openwrt
         for i in {1..3}; do
-          make download -j$(nproc) && break
-          [ $i -eq 3 ] && make download -j1 V=s
+          make -j$(nproc) download && break
           sleep 10
+          [ $i -eq 3 ] && make -j1 download V=s
         done
         find dl -size -1k -delete
 
@@ -125,6 +174,7 @@ jobs:
         cd openwrt
         make -j$(($(nproc)+1)) || make -j1 V=s
 
+        # 获取设备信息
         DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')
         echo "DEVICE_NAME=${DEVICE_NAME:-generic}" >> $GITHUB_ENV
         echo "BUILD_DATE=$(date +%Y%m%d-%H%M)" >> $GITHUB_ENV
@@ -135,12 +185,3 @@ jobs:
         name: openwrt-${{ env.DEVICE_NAME }}-${{ env.BUILD_DATE }}
         path: openwrt/bin/targets/*/*
         retention-days: 7
-
-    - name: Create Release
-      if: success() && env.UPLOAD_RELEASE == 'true'
-      uses: softprops/action-gh-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ env.BUILD_DATE }}
-        files: openwrt/bin/targets/*/*/*
