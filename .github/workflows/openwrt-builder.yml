@@ -39,96 +39,49 @@ jobs:
         cd openwrt
         git submodule update --init --recursive
 
-    - name: Apply Kwrt Customizations
+    - name: Load custom configuration
       run: |
+        function git_clone_path() {
+          trap 'rm -rf "$tmpdir"' EXIT
+          branch="$1" rurl="$2" mv="$3"
+          [[ "$mv" != "mv" ]] && shift 2 || shift 3
+          rootdir="$PWD"
+          tmpdir="$(mktemp -d)" || exit 1
+          if [ ${#branch} -lt 10 ]; then
+          git clone -b "$branch" --depth 1 --filter=blob:none --sparse "$rurl" "$tmpdir"
+          cd "$tmpdir"
+          else
+          git clone --filter=blob:none --sparse "$rurl" "$tmpdir"
+          cd "$tmpdir"
+          git checkout $branch
+          fi
+          if [ "$?" != 0 ]; then
+            echo "error on $rurl"
+            exit 1
+          fi
+          git sparse-checkout init --cone
+          git sparse-checkout set $@
+          [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
+          cd $rootdir
+          }
+        export -f git_clone_path
+        cp -rf devices/common/. openwrt/
+        cp -rf devices/${{matrix.target}}/. openwrt/
+        cp -rf devices openwrt/
         cd openwrt
-        
-        # 1. 添加Kwrt软件源
-        echo "::group::🔧 Adding Kwrt package feed"
-        sed -i '$a src-git kiddin9 https://github.com/kiddin9/kwrt-packages;main' feeds.conf.default
-        sed -i "/telephony/d" feeds.conf.default
-        cat feeds.conf.default
-        echo "::endgroup::"
-
-        # 2. 修改编译系统配置
-        echo "::group::⚙️ Modifying build system"
-        sed -i "s?targets/%S/packages?targets/%S/\$(LINUX_VERSION)?" include/feeds.mk
-        sed -i '/	refresh_config();/d' scripts/feeds
-        echo "::endgroup::"
-
-        # 3. 更新软件源
-        echo "::group::🔄 Updating feeds"
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a -p kiddin9 -f
-        ./scripts/feeds install -a
-        echo "::endgroup::"
-
-        # 4. 系统基础定制
-        echo "::group::🏗️ System customizations"
-        sed -i "s#%C\"#%C by Kiddin'\"#" package/base-files/files/etc/os-release
-        sed -i "s/192.168.1/10.0.0/" package/base-files/files/bin/config_generate
-        echo "::endgroup::"
-
-        # 5. 下载必要组件
-        echo "::group::📥 Downloading components"
-        mkdir -p {package/kernel/linux/modules,package/network/utils/nftables/patches}
-        mkdir -p {package/libs/libnftnl/patches,package/firmware/wireless-regdb/patches,config}
-        
-        components=(
-          "package/kernel/linux/modules/video.mk"
-          "package/network/utils/nftables/patches/002-nftables-add-fullcone-expression-support.patch"
-          "package/network/utils/nftables/patches/001-drop-useless-file.patch"
-          "package/libs/libnftnl/patches/001-libnftnl-add-fullcone-expression-support.patch"
-          "package/firmware/wireless-regdb/patches/600-custom-change-txpower-and-dfs.patch"
-          "config/Config-kernel.in"
-        )
-        
-        for component in "${components[@]}"; do
-          wget -qN "https://github.com/immortalwrt/immortalwrt/raw/refs/heads/$IMMORTALWRT_BRANCH/$component" -P "$(dirname $component)" || true
-        done
-        echo "::endgroup::"
-
-        # 6. 替换关键组件
-        echo "::group::🔄 Replacing core components"
-        rm -rf package/libs/openssl package/network/services/ppp
-        git clone --depth=1 -b $IMMORTALWRT_BRANCH \
-          https://github.com/immortalwrt/immortalwrt package/libs/openssl
-        git clone --depth=1 -b $IMMORTALWRT_BRANCH \
-          https://github.com/immortalwrt/immortalwrt package/network/services/ppp
-        echo "::endgroup::"
-
-        # 7. 编译优化
-        echo "::group::⚡ Build optimizations"
-        echo "$(date +"%s")" > version.date
-        sed -i '/$(curdir)\/compile:/c\$(curdir)/compile: package/opkg/host/compile' package/Makefile
-        
-        DEFAULT_PKGS="luci-app-advancedplus luci-app-firewall luci-app-package-manager \
-        luci-app-upnp luci-app-syscontrol luci-proto-wireguard luci-app-wizard \
-        luci-base luci-compat luci-lib-ipkg luci-lib-fs coremark wget-ssl curl \
-        autocore htop nano zram-swap kmod-lib-zstd kmod-tcp-bbr bash \
-        openssh-sftp-server block-mount resolveip ds-lite swconfig \
-        luci-app-fan luci-app-filemanager"
-        
-        sed -i "s/DEFAULT_PACKAGES:=/DEFAULT_PACKAGES:=$DEFAULT_PKGS /" include/target.mk
-        sed -i "s/procd-ujail//" include/target.mk
-        sed -i "s/^.*vermagic$/\techo '1' > \$(LINUX_DIR)\/.vermagic/" include/kernel-defaults.mk
-        echo "::endgroup::"
-
-        # 8. 其他优化
-        echo "::group::🎛️ System tuning"
-        sed -i 's/max_requests 3/max_requests 20/g' package/network/services/uhttpd/files/uhttpd.config
-        sed -i "s/tty\(0\|1\)::askfirst/tty\1::respawn/g" target/linux/*/base-files/etc/inittab
-        sed -i 's/option timeout 30/option timeout 60/g' package/system/rpcd/files/rpcd.config
-        echo "::endgroup::"
-
-        # 9. 品牌定制
-        echo "::group::🏷️ Branding customization"
-        sed -i "s/OpenWrt/LEDE/g" \
-          package/base-files/files/bin/config_generate \
-          package/base-files/image-config.in \
-          include/version.mk \
-          2>/dev/null || true
-        echo "::endgroup::"
+        chmod +x devices/common/$DIY_SH
+        /bin/bash "devices/common/$DIY_SH"
+        cp -f devices/common/$CONFIG_FILE .config
+        if [ -f "devices/${{matrix.target}}/$CONFIG_FILE" ]; then
+          echo >> .config
+          cat devices/${{matrix.target}}/$CONFIG_FILE >> .config
+        fi
+        if [ -f "devices/${{matrix.target}}/$DIY_SH" ]; then
+          chmod +x devices/${{matrix.target}}/$DIY_SH
+          echo "/bin/bash devices/${{matrix.target}}/$DIY_SH"
+          /bin/bash "devices/${{matrix.target}}/$DIY_SH"
+        fi
+        cp -Rf ./diy/* ./ || true
 
     - name: Download Packages
       run: |
