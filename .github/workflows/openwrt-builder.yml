@@ -126,8 +126,6 @@ jobs:
         make -j$(($(nproc)+1)) || make -j1 V=s
 
         DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')
-        echo "DEVICE_NAME=${DEVICE_NAME:-generic}" >> $GITHUB_ENV
-        echo "BUILD_DATE=$(date +%Y%m%d-%H%M)" >> $GITHUB_ENV
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
@@ -135,12 +133,3 @@ jobs:
         name: openwrt-${{ env.DEVICE_NAME }}-${{ env.BUILD_DATE }}
         path: openwrt/bin/targets/*/*
         retention-days: 7
-
-    - name: Create Release
-      if: success() && env.UPLOAD_RELEASE == 'true'
-      uses: softprops/action-gh-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ env.BUILD_DATE }}
-        files: openwrt/bin/targets/*/*/*
