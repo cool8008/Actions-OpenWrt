@@ -54,14 +54,14 @@ jobs:
         chmod +x $DIY_P1_SH
         /bin/bash "$DIY_SH"
         cp -f $GITHUB_WORKSPACE/.config
-        if [ -f "devices/${{matrix.target}}/$CONFIG_FILE" ]; then
+        if [ -f "$GITHUB_WORKSPACE/$CONFIG_FILE" ]; then
           echo >> .config
-          cat devices/${{matrix.target}}/$CONFIG_FILE >> .config
+          cat $GITHUB_WORKSPACE/$CONFIG_FILE >> .config
         fi
-        if [ -f "devices/${{matrix.target}}/$DIY_SH" ]; then
-          chmod +x devices/${{matrix.target}}/$DIY_SH
-          echo "/bin/bash devices/${{matrix.target}}/$DIY_SH"
-          /bin/bash "devices/${{matrix.target}}/$DIY_SH"
+        if [ -f "$GITHUB_WORKSPACE/$DIY_SH" ]; then
+          chmod +x $GITHUB_WORKSPACE/$DIY_SH
+          echo "/bin/bash $GITHUB_WORKSPACE/$DIY_SH"
+          /bin/bash "$GITHUB_WORKSPACE/$DIY_SH"
         fi
         cp -Rf ./diy/* ./ || true
         
