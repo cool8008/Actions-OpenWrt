@@ -45,7 +45,7 @@ jobs:
         
         # 1. 添加Kwrt软件源
         echo "::group::🔧 Adding Kwrt package feed"
-        sed -i '$a src-git kiddin9 $KWRT_PKG_URL;main' feeds.conf.default
+        sed -i '$a src-git kiddin9 https://github.com/kiddin9/kwrt-packages;main' feeds.conf.default
         sed -i "/telephony/d" feeds.conf.default
         cat feeds.conf.default
         echo "::endgroup::"
